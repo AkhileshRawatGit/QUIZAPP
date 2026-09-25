@@ -1,0 +1,99 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id           String       @id @default(uuid())
+  name         String?
+  email        String?      @unique
+  password     String?
+  image        String?
+  role         String       @default("USER") // USER or ADMIN
+  program      String?      // Student program / course
+  results      Result[]
+  quizAccesses QuizAccess[]
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  @@map("users")
+}
+
+model Quiz {
+  id          String       @id @default(uuid())
+  title       String
+  description String?
+  category    String
+  difficulty  String       // Easy, Medium, Hard
+  timeLimit   Int          @default(2700) // seconds (45 min)
+  isActive    Boolean      @default(true)  // shows on dashboard immediately
+  isLocked    Boolean      @default(true)  // 🔒 locked by admin until unlocked
+  questions   Question[]
+  results     Result[]
+  accesses    QuizAccess[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@map("quizzes")
+}
+
+model Question {
+  id         String   @id @default(uuid())
+  quizId     String
+  quiz       Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  text       String
+  code       String?
+  type       String   @default("MCQ")
+  orderIndex Int      @default(0)
+  options    Option[]
+
+  @@map("questions")
+}
+
+model Option {
+  id         String   @id @default(uuid())
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  text       String
+  isCorrect  Boolean
+  orderIndex Int      @default(0)
+
+  @@map("options")
+}
+
+model Result {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  quizId    String
+  quiz      Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  score     Int
+  total     Int
+  percentage Float
+  status    String   // PASS or FAIL
+  timeTaken Int?     // seconds taken
+  createdAt DateTime @default(now())
+
+  @@unique([userId, quizId]) // Prevent duplicate submissions
+  @@map("results")
+}
+
+// Access control: Admin grants each participant access to a quiz
+model QuizAccess {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  quizId    String
+  quiz      Quiz      @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  isGranted Boolean   @default(false)
+  grantedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@unique([userId, quizId])
+  @@map("quiz_accesses")
+}

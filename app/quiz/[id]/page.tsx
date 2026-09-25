@@ -11,7 +11,7 @@ import { useRouter } from "next/navigation";
 import {
     Loader2, ArrowLeft, ArrowRight, CheckCircle2, Timer,
     Zap, Lock, Clock, RefreshCw, AlertTriangle, ShieldCheck, WifiOff,
-    Maximize, Minimize
+    Maximize, Minimize, ShieldAlert, AlertOctagon
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -40,6 +40,13 @@ export default function QuizPage({ params }: { params: Promise<{ id: string }> }
         attempt: 1,
         maxAttempts: 3,
     });
+
+    const [violations, setViolations] = useState(0);
+    const violationsRef = useRef(0);
+    const [showViolationModal, setShowViolationModal] = useState(false);
+    const [isAutoSubmittingViolation, setIsAutoSubmittingViolation] = useState(false);
+    const [violationReason, setViolationReason] = useState("");
+    const lastViolationTimeRef = useRef(0);
 
     const hasSubmittedRef = useRef(false);
     const answersRef = useRef<Record<string, string>>({});
@@ -259,6 +266,111 @@ export default function QuizPage({ params }: { params: Promise<{ id: string }> }
             }
         }
     }, [quiz, id, router]);
+
+    const recordViolation = useCallback((reason: string) => {
+        if (phase !== "quiz" || hasSubmittedRef.current) return;
+
+        const now = Date.now();
+        // Debounce violations within 2.5 seconds to avoid multi-triggers from a single event
+        if (now - lastViolationTimeRef.current < 2500) return;
+        lastViolationTimeRef.current = now;
+
+        const count = violationsRef.current + 1;
+        violationsRef.current = count;
+        setViolations(count);
+        setViolationReason(reason);
+
+        if (count >= 2) {
+            setIsAutoSubmittingViolation(true);
+            setShowViolationModal(true);
+            // Auto submit immediately on 2nd violation
+            setTimeout(() => {
+                executeSubmit();
+            }, 1500);
+        } else {
+            setShowViolationModal(true);
+        }
+    }, [phase, executeSubmit]);
+
+    const handleResumeFullscreen = async () => {
+        try {
+            if (!document.fullscreenElement) {
+                if (document.documentElement.requestFullscreen) {
+                    await document.documentElement.requestFullscreen();
+                } else if ((document.documentElement as any).webkitRequestFullscreen) {
+                    await (document.documentElement as any).webkitRequestFullscreen();
+                }
+                setIsFullscreen(true);
+            }
+        } catch (err) {
+            console.warn("Fullscreen request error:", err);
+        }
+        if (!isAutoSubmittingViolation) {
+            setShowViolationModal(false);
+        }
+    };
+
+    // ── Anti-Cheat: Tab/Window switch, Fullscreen check, and shortcut locks ──
+    useEffect(() => {
+        if (phase !== "quiz") return;
+
+        const handleVisibility = () => {
+            if (document.hidden) {
+                recordViolation("Tab or window switch detected");
+            }
+        };
+
+        const handleBlur = () => {
+            recordViolation("Window lost focus / switched application");
+        };
+
+        const handleFsChange = () => {
+            const inFs = !!document.fullscreenElement;
+            setIsFullscreen(inFs);
+            if (!inFs && !hasSubmittedRef.current && phase === "quiz") {
+                recordViolation("Exited full-screen mode");
+            }
+        };
+
+        const handleContextMenu = (e: MouseEvent) => {
+            e.preventDefault();
+        };
+
+        const handleKeyDown = (e: KeyboardEvent) => {
+            // Block F12, inspect element, view source, cut/copy/paste shortcuts
+            if (
+                e.key === "F12" ||
+                (e.ctrlKey && e.shiftKey && (e.key === "I" || e.key === "i" || e.key === "J" || e.key === "j" || e.key === "C" || e.key === "c")) ||
+                (e.ctrlKey && (e.key === "u" || e.key === "U" || e.key === "c" || e.key === "C" || e.key === "v" || e.key === "V" || e.key === "x" || e.key === "X"))
+            ) {
+                e.preventDefault();
+            }
+        };
+
+        const handleCopyPaste = (e: ClipboardEvent) => {
+            e.preventDefault();
+        };
+
+        document.addEventListener("visibilitychange", handleVisibility);
+        window.addEventListener("blur", handleBlur);
+        document.addEventListener("fullscreenchange", handleFsChange);
+        document.addEventListener("contextmenu", handleContextMenu);
+        document.addEventListener("keydown", handleKeyDown);
+        document.addEventListener("copy", handleCopyPaste);
+        document.addEventListener("cut", handleCopyPaste);
+        document.addEventListener("paste", handleCopyPaste);
+
+        return () => {
+            document.removeEventListener("visibilitychange", handleVisibility);
+            window.removeEventListener("blur", handleBlur);
+            document.removeEventListener("fullscreenchange", handleFsChange);
+            document.removeEventListener("contextmenu", handleContextMenu);
+            document.removeEventListener("keydown", handleKeyDown);
+            document.removeEventListener("copy", handleCopyPaste);
+            document.removeEventListener("cut", handleCopyPaste);
+            document.removeEventListener("paste", handleCopyPaste);
+        };
+    }, [phase, recordViolation]);
 
     // ── Quiz countdown timer ──
     useEffect(() => {
@@ -526,11 +638,24 @@ export default function QuizPage({ params }: { params: Promise<{ id: string }> }
                     </div>
 
                     <div className="space-y-3">
+                        {/* High-visibility Proctoring Warning */}
+                        <div className="p-4 rounded-2xl bg-red-500/10 border border-red-500/30 flex items-start gap-3.5">
+                            <ShieldAlert className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+                            <div className="space-y-1">
+                                <p className="text-xs font-black uppercase tracking-wider text-red-400">Strict Anti-Cheat Proctoring Active</p>
+                                <p className="text-xs text-gray-300 leading-relaxed">
+                                    The quiz runs in mandatory <strong>Full-Screen mode</strong>. If you switch tabs, minimize the window, or exit full-screen, you will receive a warning. 
+                                    On the <strong>2nd attempt, the quiz will be IMMEDIATELY AUTO-SUBMITTED</strong>. 
+                                    Any questions left unanswered will receive <strong>0 marks</strong>.
+                                </p>
+                            </div>
+                        </div>
+
                         {[
+                            { title: "🖥️ Mandatory Full-Screen", desc: "You must remain in full-screen mode throughout the assessment." },
+                            { title: "⚠️ 2-Strike Violation Limit", desc: "Switching tabs or minimizing the browser will auto-terminate your test after 2 attempts." },
                             { title: "⏱ Timer", desc: `${Math.floor((quiz?.timeLimit ?? 2700) / 60)} minutes — auto-submits when time runs out.` },
-                            { title: "🧭 Navigation", desc: "Move freely between questions. Answers are saved as you go." },
-                            { title: "🚫 No Refresh", desc: "Don't refresh the browser — your progress may be lost." },
-                            { title: "📋 One Attempt Only", desc: "You can only submit once. This quiz cannot be retaken." },
+                            { title: "📋 One Attempt Only", desc: "Once submitted, this quiz cannot be retaken under any circumstances." },
                         ].map((item) => (
                             <div key={item.title} className="flex gap-3 items-start p-4 bg-white/[0.02] rounded-xl border border-white/5">
                                 <div>
@@ -566,12 +691,12 @@ export default function QuizPage({ params }: { params: Promise<{ id: string }> }
     const isLast = currentQuestion === quiz.questions.length - 1;
 
     return (
-        <div className="fixed inset-0 z-[150] min-h-screen bg-background pt-8 pb-20 px-6 overflow-y-auto">
+        <div className="fixed inset-0 z-[150] min-h-screen bg-background pt-8 pb-20 px-6 overflow-y-auto select-none">
             <div className="fixed inset-0 grid-bg opacity-10 pointer-events-none" />
             <div className="max-w-4xl mx-auto relative z-10">
 
                 {/* Header */}
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-12">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-8">
                     <div className="space-y-1">
                         <p className="text-[10px] font-black uppercase tracking-[0.4em] text-primary">{quiz.title}</p>
                         <div className="text-3xl font-bold tracking-tighter">
@@ -579,14 +704,24 @@ export default function QuizPage({ params }: { params: Promise<{ id: string }> }
                             <span className="text-white/20"> / {String(quiz.questions.length).padStart(2, "0")}</span>
                         </div>
                     </div>
-                    <div className="flex items-center gap-3">
+                    <div className="flex flex-wrap items-center gap-3">
+                        {/* Anti-Cheat Strike Indicator */}
+                        <div className={`px-4 py-2.5 glass rounded-full border flex items-center gap-2 text-xs font-mono font-bold transition-all ${
+                            violations === 0
+                                ? "border-green-500/30 text-green-400 bg-green-500/5"
+                                : "border-red-500/50 text-red-400 bg-red-500/10 animate-pulse shadow-[0_0_15px_rgba(239,68,68,0.25)]"
+                        }`}>
+                            <ShieldAlert className="w-3.5 h-3.5" />
+                            <span>STRIKES: {violations}/2</span>
+                        </div>
+
                         <button
                             type="button"
                             onClick={toggleFullscreen}
                             className={`px-4 py-2.5 glass rounded-full border flex items-center gap-2 text-xs font-mono font-bold transition-all cursor-pointer ${
                                 isFullscreen
                                     ? "border-primary/40 text-primary bg-primary/10 shadow-[0_0_15px_rgba(0,242,255,0.15)]"
-                                    : "border-yellow-500/40 text-yellow-400 bg-yellow-500/10 hover:border-yellow-500 animate-pulse"
+                                    : "border-red-500/50 text-red-400 bg-red-500/10 hover:border-red-500 animate-pulse"
                             }`}
                             title={isFullscreen ? "Fullscreen is active" : "Click to enter Fullscreen"}
                         >
@@ -611,6 +746,27 @@ export default function QuizPage({ params }: { params: Promise<{ id: string }> }
                         </div>
                     </div>
                 </div>
+
+                {/* Fullscreen Alert Banner if minimized/exited */}
+                {!isFullscreen && !showViolationModal && !submitting && phase === "quiz" && (
+                    <motion.div
+                        initial={{ opacity: 0, y: -10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="mb-8 p-4 rounded-2xl bg-red-500/20 border-2 border-red-500 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-[0_0_30px_rgba(239,68,68,0.25)]"
+                    >
+                        <div className="flex items-center gap-3 text-red-200 text-xs font-bold">
+                            <AlertTriangle className="w-5 h-5 text-red-400 shrink-0 animate-bounce" />
+                            <span>MANDATORY FULL-SCREEN REQUIRED: Please restore full-screen mode to continue.</span>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={handleResumeFullscreen}
+                            className="px-5 py-2.5 bg-red-500 hover:bg-red-400 text-white font-black text-xs uppercase tracking-widest rounded-xl flex items-center gap-2 cursor-pointer shadow-lg shrink-0 transition-all"
+                        >
+                            <Maximize className="w-3.5 h-3.5" /> Return to Fullscreen
+                        </button>
+                    </motion.div>
+                )}
 
                 {/* Progress bar */}
                 <div className="h-px w-full bg-white/10 mb-14 relative overflow-hidden">
@@ -715,6 +871,118 @@ export default function QuizPage({ params }: { params: Promise<{ id: string }> }
                     )}
                 </div>
             </div>
+
+            {/* ─── 🚨 ANTI-CHEAT & SECURITY VIOLATION MODAL ─── */}
+            <AnimatePresence>
+                {showViolationModal && (
+                    <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="fixed inset-0 z-[200] bg-black/95 backdrop-blur-2xl flex items-center justify-center p-6 select-none"
+                    >
+                        <motion.div
+                            initial={{ scale: 0.88, y: 20 }}
+                            animate={{ scale: 1, y: 0 }}
+                            exit={{ scale: 0.88, y: 20 }}
+                            className={`max-w-lg w-full glass p-8 md:p-10 rounded-[2.5rem] border text-center space-y-6 relative overflow-hidden shadow-2xl ${
+                                violations >= 2
+                                    ? "border-red-500/60 shadow-[0_0_60px_rgba(239,68,68,0.3)] bg-red-950/20"
+                                    : "border-yellow-500/60 shadow-[0_0_60px_rgba(234,179,8,0.25)] bg-yellow-950/20"
+                            }`}
+                        >
+                            {/* Animated Scan Line */}
+                            <div className={`absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent ${violations >= 2 ? "via-red-500" : "via-yellow-400"} to-transparent animate-scan`} />
+
+                            {violations >= 2 ? (
+                                <>
+                                    {/* Critical Violation - Auto Submitting */}
+                                    <div className="relative flex items-center justify-center">
+                                        <div className="absolute w-28 h-28 rounded-full border border-red-500/30 animate-ping" style={{ animationDuration: "1.2s" }} />
+                                        <div className="w-20 h-20 bg-red-500/20 border-2 border-red-500 rounded-full flex items-center justify-center shadow-[0_0_40px_rgba(239,68,68,0.5)]">
+                                            <AlertOctagon className="w-10 h-10 text-red-500 animate-pulse" />
+                                        </div>
+                                    </div>
+
+                                    <div className="space-y-3">
+                                        <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-red-500/20 border border-red-500/40 text-red-400 text-[10px] font-black uppercase tracking-[0.3em]">
+                                            <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
+                                            Security Limit Exceeded (Attempt 2/2)
+                                        </div>
+                                        <h2 className="text-3xl font-black uppercase tracking-tight text-white leading-tight">
+                                            Assessment Terminated
+                                        </h2>
+                                        <p className="text-sm text-red-300/90 leading-relaxed max-w-sm mx-auto">
+                                            You committed <strong>2 security infractions</strong> by switching tabs, minimizing, or leaving full-screen mode.
+                                        </p>
+                                    </div>
+
+                                    <div className="p-4 rounded-2xl bg-black/60 border border-red-500/30 text-left space-y-2 text-xs">
+                                        <div className="flex items-center justify-between font-mono text-gray-400">
+                                            <span>Violation Cause:</span>
+                                            <span className="text-red-400 font-bold">{violationReason || "Tab / Window switch"}</span>
+                                        </div>
+                                        <div className="flex items-center justify-between font-mono text-gray-400">
+                                            <span>Unsolved Questions:</span>
+                                            <span className="text-red-400 font-bold">Awarded 0 Marks</span>
+                                        </div>
+                                        <div className="flex items-center justify-between font-mono text-gray-400">
+                                            <span>Retake Policy:</span>
+                                            <span className="text-red-400 font-bold">Strictly Prohibited</span>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-center justify-center gap-3 text-red-400 text-xs font-mono font-bold tracking-wider pt-2">
+                                        <Loader2 className="w-4 h-4 animate-spin text-red-500" /> Auto-transmitting test records...
+                                    </div>
+                                </>
+                            ) : (
+                                <>
+                                    {/* Warning 1 - Strike 1 */}
+                                    <div className="relative flex items-center justify-center">
+                                        <div className="absolute w-24 h-24 rounded-full border border-yellow-500/20 animate-ping" style={{ animationDuration: "2s" }} />
+                                        <div className="w-20 h-20 bg-yellow-500/15 border-2 border-yellow-500/50 rounded-full flex items-center justify-center shadow-[0_0_35px_rgba(234,179,8,0.3)]">
+                                            <ShieldAlert className="w-10 h-10 text-yellow-400" />
+                                        </div>
+                                    </div>
+
+                                    <div className="space-y-3">
+                                        <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-yellow-500/20 border border-yellow-500/40 text-yellow-400 text-[10px] font-black uppercase tracking-[0.3em]">
+                                            <span className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse" />
+                                            Warning: Infraction 1 of 2
+                                        </div>
+                                        <h2 className="text-3xl font-black uppercase tracking-tight text-white leading-tight">
+                                            Screen Departure Detected
+                                        </h2>
+                                        <p className="text-sm text-gray-300 leading-relaxed max-w-sm mx-auto">
+                                            You left the proctored quiz window: <span className="text-yellow-400 font-bold">{violationReason || "Tab switch or minimized"}</span>.
+                                        </p>
+                                    </div>
+
+                                    <div className="p-4 rounded-2xl bg-yellow-500/10 border border-yellow-500/30 text-left space-y-2 text-xs">
+                                        <p className="font-bold text-yellow-300 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                                            <AlertTriangle className="w-4 h-4 text-yellow-400 shrink-0" /> Final Warning Notice
+                                        </p>
+                                        <p className="text-gray-300 leading-relaxed">
+                                            You have <strong>ONLY 1 ATTEMPT REMAINING</strong>. If you switch tabs, minimize, or exit full-screen one more time, your quiz will be <strong>IMMEDIATELY AUTO-SUBMITTED</strong>. Any unanswered questions will receive <strong>0 marks</strong>.
+                                        </p>
+                                    </div>
+
+                                    <div className="pt-2">
+                                        <button
+                                            type="button"
+                                            onClick={handleResumeFullscreen}
+                                            className="w-full py-4 bg-yellow-400 hover:bg-yellow-300 text-black font-black text-xs uppercase tracking-[0.2em] rounded-xl shadow-[0_0_30px_rgba(234,179,8,0.4)] transition-all flex items-center justify-center gap-2 cursor-pointer"
+                                        >
+                                            <Maximize className="w-4 h-4" /> Return to Quiz in Fullscreen
+                                        </button>
+                                    </div>
+                                </>
+                            )}
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
 
             {/* ─── 🛡️ CONCURRENCY & SUBMISSION QUEUE MODAL OVERLAY ─── */}
             <AnimatePresence>
